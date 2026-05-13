@@ -1,0 +1,129 @@
+
+%% Configuration
+port = "COM6";
+baudrate = 115200;
+
+num_scans = 3;              %  match MCU NUM_SCANS
+y_step_mm = 304.8;          
+
+%% Open serial port
+device = serialport(port, baudrate);
+device.Timeout = 10;
+configureTerminator(device, "CR/LF");
+
+fprintf("Opening: %s\n", port);
+flush(device);
+
+fprintf("Press PJ1 on the board to start the 3-scan sequence.\n");
+
+scan_points = cell(num_scans, 1);
+all_points = [];
+
+for scan_num = 1:num_scans
+    fprintf("\n--- Waiting for scan %d of %d ---\n", scan_num, num_scans);
+
+    rows = [];
+    inScan = false;
+
+    while true
+        line = strtrim(string(readline(device)));
+        fprintf("%s\n", line);
+
+        if line == "SCAN_START"
+            inScan = true;
+            rows = [];
+            continue
+        end
+
+        if ~inScan
+            continue
+        end
+
+        if line == "SCAN_END"
+            break
+        end
+
+        if startsWith(line, "index,")
+            continue
+        end
+
+        parts = split(line, ",");
+        if numel(parts) ~= 4
+            continue
+        end
+
+        index = str2double(parts(1));
+        angle_deg = str2double(parts(2));
+        range_status = str2double(parts(3));
+        distance_mm = str2double(parts(4));
+
+        if any(isnan([index angle_deg range_status distance_mm]))
+            continue
+        end
+
+        rows(end+1, :) = [index angle_deg range_status distance_mm];
+    end
+
+    rows = sortrows(rows, 1);
+
+angle_deg = rows(:,2);
+range_status = rows(:,3);
+distance_mm = rows(:,4);
+
+% cap to valid range
+distance_mm(distance_mm > 4000) = 4000;
+
+
+% replace invalid points with max distance
+distance_mm(range_status ~= 0) = 4000;
+
+angle_valid = angle_deg;
+distance_valid = distance_mm;
+
+    angle_offset_deg = 11.25;
+    theta = deg2rad(angle_valid -0*angle_offset_deg);
+
+    x = ones(size(theta)) * ((scan_num - 1) * y_step_mm);
+    y = distance_valid .* sin(theta);
+    z = -distance_valid .* cos(theta);
+    
+    
+    current_scan = [x y z];
+    scan_points{scan_num} = current_scan;
+    all_points = [all_points; current_scan];
+end
+
+fprintf("Closing: %s\n", port);
+clear device;
+
+%% Write XYZ file
+fid = fopen("tof_radar.xyz", "w");
+for k = 1:size(all_points,1)
+    fprintf(fid, "%.3f %.3f %.3f\n", all_points(k,1), all_points(k,2), all_points(k,3));
+end
+fclose(fid);
+
+fprintf("Wrote XYZ file: tof_radar.xyz\n");
+
+%% Plot
+figure
+scatter3(all_points(:,1), all_points(:,2), all_points(:,3), 30, 'filled')
+hold on
+
+for scan_num = 1:num_scans
+    pts = scan_points{scan_num};
+    if isempty(pts)
+        continue
+    end
+
+    closed_pts = [pts; pts(1,:)];
+    plot3(closed_pts(:,1), closed_pts(:,2), closed_pts(:,3), '-o')
+end
+
+xlabel('X (mm)')
+ylabel('Y (mm)')
+zlabel('Z (mm)')
+title('ToF Scans with 32 Points per Scan')
+grid on
+axis equal
+hold off
